@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-deploy
+  labels:
+    app: backend-app
+  namespace: final-project
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend-app
+  template:
+    metadata:
+      name: backend-app
+      labels:
+        app: backend-app
+    spec:
+      containers:
+        - name: backend-app
+          image: debugtitans/backend:latest
+          ports:
+            - containerPort: 3000

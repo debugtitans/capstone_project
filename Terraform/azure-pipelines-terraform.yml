@@ -1,0 +1,161 @@
+
+name: 'Terraform Pipeline'
+
+# Manual run only
+trigger: none
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  TF_WORKING_DIR: 'solution'
+  AZURE_SERVICE_CONNECTION: 'Azure-subscription'
+
+stages:
+# ------------------------
+# Stage 1: Format & Validate
+# ------------------------
+- stage: TerraformFormatAndValidate
+  displayName: 'Terraform Format & Validate'
+  jobs:
+  - job: FormatAndValidate
+    displayName: 'Check Format and Validate'
+    steps:
+    - checkout: self
+
+    - task: TerraformInstaller@1
+      displayName: 'Install Terraform'
+      inputs:
+        terraformVersion: '1.5.7'
+
+    - task: AzureCLI@2
+      displayName: 'Terraform Format and Validate'
+      inputs:
+        azureSubscription: '$(AZURE_SERVICE_CONNECTION)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          cd $(TF_WORKING_DIR)
+          terraform fmt -check -recursive
+          terraform init
+          terraform validate
+
+# ------------------------
+# Stage 2: Terraform Plan
+# ------------------------
+- stage: TerraformPlan
+  displayName: 'Terraform Plan'
+  dependsOn: TerraformFormatAndValidate
+  jobs:
+  - job: Plan
+    displayName: 'Terraform Plan'
+    steps:
+    - checkout: self
+
+    - task: TerraformInstaller@1
+      displayName: 'Install Terraform'
+      inputs:
+        terraformVersion: '1.5.7'
+
+    - task: AzureCLI@2
+      displayName: 'Terraform Plan'
+      inputs:
+        azureSubscription: '$(AZURE_SERVICE_CONNECTION)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          cd $(TF_WORKING_DIR)
+          terraform init
+          terraform plan -out=tfplan
+# ------------------------
+# Stage 3: Terraform Apply 
+# ------------------------
+- stage: TerraformApply
+  displayName: 'Terraform Apply'
+  dependsOn: TerraformPlan
+  jobs:
+  - deployment: Apply
+    displayName: 'Terraform Apply'
+    environment: 'Terraform-Approval' # <-- Manual approval environment
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - checkout: self
+
+            - task: TerraformInstaller@1
+              displayName: 'Install Terraform'
+              inputs:
+                terraformVersion: '1.5.7'
+
+            - task: AzureCLI@2
+              displayName: 'Terraform Apply'
+              inputs:
+                azureSubscription: '$(AZURE_SERVICE_CONNECTION)'
+                scriptType: bash
+                scriptLocation: inlineScript
+                inlineScript: |
+                  cd $(TF_WORKING_DIR)
+                  terraform init
+                  terraform apply -auto-approve
+
+
+# ------------------------
+# Stage 4: Setup Ingress + Print External IP
+# ------------------------
+- stage: SetupIngress
+  displayName: 'Setup Ingress'
+  dependsOn: TerraformApply
+  condition: succeeded()
+  jobs:
+  - job: InstallIngress
+    displayName: 'Install Ingress Controller'
+    steps:
+    - checkout: self
+
+    - task: AzureCLI@2
+      displayName: 'Install Ingress and Print External IP'
+      inputs:
+        azureSubscription: '$(AZURE_SERVICE_CONNECTION)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          # Get AKS credentials
+          az aks get-credentials \
+            --resource-group devops1-week12-capstone-debugtitans-rg \
+            --name devops1-week12-capstone-debugtitans-aks \
+            --admin \
+            --overwrite-existing
+
+          # Install Helm (latest version)
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+          # Create namespace if not exists
+          kubectl create namespace ingress-nginx --dry-run=client -o yaml | kubectl apply -f -
+
+          # Install/Upgrade Ingress NGINX
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+          --namespace ingress-nginx \
+          --version 4.10.0 \
+          --set controller.deployment.progressDeadlineSeconds=60
+
+
+
+          echo "-----Waiting for External IP..."
+          for i in {1..20}; do
+            EXTERNAL_IP=$(kubectl get svc ingress-nginx-controller -n ingress-nginx --output jsonpath="{.status.loadBalancer.ingress[0].ip}")
+            if [[ -n "$EXTERNAL_IP" ]]; then
+              echo " Ingress External IP: $EXTERNAL_IP"
+              break
+            fi
+            echo "-----Waiting for External IP... retrying in 10s"
+            sleep 10
+          done
+
+          if [[ -z "$EXTERNAL_IP" ]]; then
+            echo " Failed to get External IP"
+            exit 1
+          fi

@@ -1,0 +1,97 @@
+trigger: none        # do not auto-trigger on commits
+pr: none             # do not auto-trigger on PRs
+
+variables:
+  AZURE_SERVICE_CONNECTION: 'Azure-subscription'         # name of Service Connection
+  DOCKER_CONNECTION: 'DockerHub-Connection'              # Docker Registry service connection
+  dockerHubUsername: 'debugtitans'                       # Docker Hub username
+  RESOURCE_GROUP: 'devops1-week12-capstone-debugtitans-rg'  # Resource Group that includes AKS
+  AKS_CLUSTER_NAME: 'devops1-week12-capstone-debugtitans-aks' # name of AKS Cluster
+  IMAGE_NAME: 'frontend'                                 # repo name on Docker Hub
+  TAG: '$(Build.BuildId)'                                # image tag based on build ID
+  K8S_DIR: 'kubernetes'                                  # dir for manifests
+  NAMESPACE: 'final-project'                             # Kubernetes namespace
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+
+# === Stage: Build & Push Image to Docker Hub ===
+- stage: Build
+  displayName: 'Build & Push Frontend Image'
+  jobs:
+  - job: Build
+    displayName: 'Build'
+    steps:
+      - checkout: self
+
+      - task: NodeTool@0
+        displayName: 'Install Node.js'
+        inputs:
+          versionSpec: '18.x'
+
+      - script: |
+          cd frontend
+          npm install
+          npm run build
+        displayName: 'Build Frontend'
+
+      - task: Docker@2
+        displayName: 'Login to Docker Hub'
+        inputs:
+          containerRegistry: '$(DOCKER_CONNECTION)'
+          command: login
+
+      - task: Docker@2
+        displayName: 'Build & Push to Docker Hub'
+        inputs:
+          containerRegistry: '$(DOCKER_CONNECTION)'
+          repository: '$(dockerHubUsername)/$(IMAGE_NAME)'
+          command: buildAndPush
+          dockerfile: 'Dockerfile'    
+          buildContext: '.'       #  root path because Dockerfile in it
+          tags: |
+            $(TAG)
+
+# === Stage: Deploy to AKS ===
+- stage: Deploy
+  displayName: 'Deploy Frontend to AKS'
+  dependsOn: Build
+  jobs:
+  - job: Deploy
+    displayName: 'Apply Kubernetes Manifests'
+    steps:
+      - checkout: self
+
+      # Get AKS Credentials
+      - task: AzureCLI@2
+        displayName: 'Get AKS Credentials'
+        inputs:
+          azureSubscription: '$(AZURE_SERVICE_CONNECTION)'
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            az aks get-credentials \
+              --resource-group $(RESOURCE_GROUP) \
+              --name $(AKS_CLUSTER_NAME) \
+              --admin \
+              --overwrite-existing
+            kubectl config current-context
+
+      # 3)  apply Namespace
+      - script: |
+          kubectl apply -f $(K8S_DIR)/namespace.yml
+        displayName: 'Apply Namespace'
+
+      # 4)  Deployment + Service +delete old ingress if any and apply ingress
+      - script: |
+        
+          kubectl apply -f $(K8S_DIR)/frontend_deploy.yml
+          kubectl apply -f $(K8S_DIR)/frontend_cluster_ip.yml
+
+
+          # apply Ingress again
+          kubectl apply -f $(K8S_DIR)/frontend_ingress.yml
+        displayName: 'Apply Frontend Manifests'
+

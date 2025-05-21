@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-deploy
+  labels:
+    app: frontend-app
+  namespace: final-project
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: frontend-app
+  template:
+    metadata:
+      name: frontend-app
+      labels:
+        app: frontend-app
+    spec:
+      containers:
+        - name: frontend-app
+          image: debugtitans/frontend:latest
+          ports:
+            - containerPort: 3000
